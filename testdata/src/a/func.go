@@ -86,6 +86,7 @@ func func_test7() {
 func closeResp(resp *http.Response) {
 	defer resp.Body.Close()
 }
+
 func func_test8() {
 	resp, err := http.Get("https://example.com")
 	if err != nil {
@@ -97,4 +98,13 @@ func func_test8() {
 
 func closeBody(b io.Closer) {
 	defer b.Close()
+}
+
+func func_test9() {
+	resp, err := http.Get("https://example.com")
+	if err != nil {
+		return
+	}
+	resp.Body.Read(make([]byte, 0))
+	defer closeBody(resp.Body)
 }

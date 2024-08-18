@@ -182,7 +182,7 @@ func (r *inspector) inspectCallReturnsResp(call *ssa.Call) bool {
 				results = append(results, r.inspectExtractResponse(ref))
 			}
 		case *ssa.FieldAddr:
-			if r.isBodyVarFieldAddr(ref) {
+			if r.isHttpResponseType(ref.X.Type()) {
 				results = append(results, r.inspectFieldAddrBody(ref))
 			}
 		}
@@ -208,7 +208,7 @@ func (r *inspector) inspectExtractResponse(extract *ssa.Extract) bool {
 	for _, referrer := range *extract.Referrers() {
 		switch ref := referrer.(type) {
 		case *ssa.FieldAddr:
-			if r.isBodyVarFieldAddr(ref) && r.inspectFieldAddrBody(ref) {
+			if r.inspectFieldAddrBody(ref) {
 				return true
 			}
 		case *ssa.Store:
@@ -216,7 +216,7 @@ func (r *inspector) inspectExtractResponse(extract *ssa.Extract) bool {
 				return true
 			}
 		case *ssa.Call:
-			if r.isInCallParameter(ref, extract) && r.inspectCall(ref, extract) {
+			if r.inspectCallInstr(ref, extract) {
 				return true
 			}
 		case *ssa.Return:
@@ -229,6 +229,10 @@ func (r *inspector) inspectExtractResponse(extract *ssa.Extract) bool {
 
 func (r *inspector) inspectFieldAddrBody(fieldAddr *ssa.FieldAddr) bool {
 	r.traces = append(r.traces, fmt.Sprintf("inspectFieldAddr:\t%[1]p\t%[1]v", fieldAddr))
+
+	if !r.isBodyVarFieldAddr(fieldAddr) {
+		return false
+	}
 
 	for _, ref := range *fieldAddr.Referrers() {
 		switch ref := ref.(type) {
@@ -270,10 +274,8 @@ func (r *inspector) inspectDereferResponse(unOp *ssa.UnOp) bool {
 	for _, ref := range *unOp.Referrers() {
 		switch ref := ref.(type) {
 		case *ssa.FieldAddr:
-			if r.isBodyVarFieldAddr(ref) {
-				if r.inspectFieldAddrBody(ref) {
-					return true
-				}
+			if r.inspectFieldAddrBody(ref) {
+				return true
 			}
 		case *ssa.Store:
 			if r.inspectStore(ref) {
@@ -298,11 +300,11 @@ func (r *inspector) inspectDereferBody(unOp *ssa.UnOp) bool {
 				return true
 			}
 		case *ssa.Call:
-			if r.isCloseCall(ref) {
+			if r.inspectCallInstr(ref, unOp) {
 				return true
 			}
 		case *ssa.Defer:
-			if r.isCloseDefer(ref) {
+			if r.inspectCallInstr(ref, unOp) {
 				return true
 			}
 		case *ssa.Return:
@@ -323,26 +325,16 @@ func (r *inspector) inspectChangeInterface(changeInterface *ssa.ChangeInterface)
 				return true
 			}
 		case *ssa.Call:
-			if r.isCloseCall(ref) {
+			if r.inspectCallInstr(ref, changeInterface) {
 				return true
 			}
 		case *ssa.Defer:
-			if r.isCloseDefer(ref) {
+			if r.inspectCallInstr(ref, changeInterface) {
 				return true
 			}
 		}
 	}
 	return false
-}
-
-func (r *inspector) isCloseCall(call *ssa.Call) bool {
-	r.traces = append(r.traces, fmt.Sprintf("isCloseCall:\t\t%[1]p\t%[1]v", call))
-	return r.isCloseMethod(call.Call.Method)
-}
-
-func (r *inspector) isCloseDefer(def *ssa.Defer) bool {
-	r.traces = append(r.traces, fmt.Sprintf("isCloseDefer:\t\t%[1]p\t%[1]v", def))
-	return r.isCloseMethod(def.Call.Method)
 }
 
 func (r *inspector) inspectStore(store *ssa.Store) bool {
@@ -393,10 +385,35 @@ func (r *inspector) isClosureCalled(mc *ssa.MakeClosure) bool {
 	return false
 }
 
-func (r *inspector) isInCallParameter(call *ssa.Call, arg ssa.Value) bool {
+func (r *inspector) inspectCallInstr(call ssa.CallInstruction, arg ssa.Value) bool {
+	r.traces = append(r.traces, fmt.Sprintf("inspectCallInstr:\t%[1]p\t%[1]v", call))
+
+	if r.isCloseCallInstr(call) {
+		return true
+	}
+
+	if !r.isInCallParameter(call, arg) {
+		return false
+	}
+
+	for _, param := range call.Common().StaticCallee().Params {
+		if r.inspectCallParameter(param) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *inspector) isCloseCallInstr(call ssa.CallInstruction) bool {
+	r.traces = append(r.traces, fmt.Sprintf("isCloseCallInstr:\t%[1]p\t%[1]v", call))
+	return r.isCloseMethod(call.Common().Method)
+}
+
+func (r *inspector) isInCallParameter(call ssa.CallInstruction, arg ssa.Value) bool {
 	r.traces = append(r.traces, fmt.Sprintf("isInCallParameter:\t%[1]p\t%[1]v", call))
 
-	switch fn := call.Call.Value.(type) {
+	switch fn := call.Common().Value.(type) {
 	case *ssa.Function:
 		if fn.Signature.Recv() != nil {
 			return false
@@ -405,43 +422,7 @@ func (r *inspector) isInCallParameter(call *ssa.Call, arg ssa.Value) bool {
 		return false
 	}
 
-	return slices.Contains(call.Call.Args, arg)
-}
-
-func (r *inspector) inspectCall(call *ssa.Call, arg ssa.Value) bool {
-	r.traces = append(r.traces, fmt.Sprintf("inspectCall:\t\t%[1]p\t%[1]v", call))
-	positions, ok := r.getArgTakenPositions(call, arg)
-	if !ok {
-		return false
-	}
-
-	params := call.Call.StaticCallee().Params
-
-	for _, p := range positions {
-		if r.inspectCallParameter(params[p]) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (r *inspector) getArgTakenPositions(call *ssa.Call, taken ssa.Value) ([]int, bool) {
-	switch fn := call.Call.Value.(type) {
-	case *ssa.Function:
-		if fn.Signature.Recv() != nil {
-			return nil, false
-		}
-	}
-
-	positions := []int{}
-	for i, arg := range call.Call.Args {
-		if arg == taken {
-			positions = append(positions, i)
-		}
-	}
-
-	return positions, true
+	return slices.Contains(call.Common().Args, arg)
 }
 
 func (r *inspector) inspectCallParameter(param *ssa.Parameter) bool {
@@ -450,11 +431,19 @@ func (r *inspector) inspectCallParameter(param *ssa.Parameter) bool {
 	for _, ref := range *param.Referrers() {
 		switch ref := ref.(type) {
 		case *ssa.FieldAddr:
-			if r.isBodyVarFieldAddr(ref) && r.inspectFieldAddrBody(ref) {
+			if r.inspectFieldAddrBody(ref) {
 				return true
 			}
 		case *ssa.Store:
 			if r.inspectStore(ref) {
+				return true
+			}
+		case *ssa.Call:
+			if r.inspectCallInstr(ref, param) {
+				return true
+			}
+		case *ssa.Defer:
+			if r.inspectCallInstr(ref, param) {
 				return true
 			}
 		}

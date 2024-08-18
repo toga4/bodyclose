@@ -35,8 +35,19 @@ func (r *runner) logInstruction(instr ssa.Instruction) {
 
 	switch instr := instr.(type) {
 	case *ssa.Call:
-		fmt.Printf("\t[Call.Common]\n")
-		fmt.Printf("\t\t%[1]p %[1]T %[1]v\n", instr.Call.StaticCallee())
+		callee := instr.Call.StaticCallee()
+		fmt.Printf("\t[Call.StaticCallee]\n")
+		fmt.Printf("\t\t%[1]p %[1]T %[1]v\n", callee)
+		if callee != nil {
+			fmt.Printf("\t[Call.StaticCallee.Params]\n")
+			for _, param := range callee.Params {
+				fmt.Printf("\t\t%[1]p %[1]T %[1]v\n", param)
+				fmt.Printf("\t\t[Referrers]\n")
+				for _, ref := range *param.Referrers() {
+					fmt.Printf("\t\t\t%[1]p %[1]T %[1]v\n", ref)
+				}
+			}
+		}
 	case *ssa.Store:
 		fmt.Printf("\t[Addr.Name] %[1]v\n", instr.Addr.Name())
 		fmt.Printf("\t[Addr.Referrers]\n")
